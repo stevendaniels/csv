@@ -1142,7 +1142,7 @@ class CSV
   # The <tt>:output_row_sep</tt> +option+ defaults to
   # <tt>$INPUT_RECORD_SEPARATOR</tt> (<tt>$/</tt>).
   #
-  def self.filter(input=nil, output=nil, **options)
+  def self.filter(input = nil, output = nil, **options)
     # parse options for input, output, or both
     in_options, out_options = Hash.new, {row_sep: $INPUT_RECORD_SEPARATOR}
     options.each do |key, value|
@@ -1206,7 +1206,7 @@ class CSV
   # String to set the base Encoding for the output.  CSV needs this hint if you
   # plan to output non-ASCII compatible data.
   #
-  def self.generate(str=nil, **options)
+  def self.generate(str = nil, **options)
     # add a default empty String, if none was given
     if str
       str = StringIO.new(str)
@@ -1235,7 +1235,7 @@ class CSV
   # (<tt>$/</tt>) when calling this method.
   #
   def self.generate_line(row, **options)
-    options = {row_sep: $INPUT_RECORD_SEPARATOR}.merge(options)
+    options = { row_sep: $INPUT_RECORD_SEPARATOR }.merge(options)
     str = String.new
     if options[:encoding]
       str.force_encoding(options[:encoding])
@@ -1308,17 +1308,17 @@ class CSV
   # * truncate()
   # * tty?()
   #
-  def self.open(filename, mode="r", **options)
+  def self.open(filename, mode = "r", **options)
     # wrap a File opened with the remaining +args+ with no newline
     # decorator
-    file_opts = {universal_newline: false}.merge(options)
+    file_opts = { universal_newline: false}.merge(options)
 
     begin
       f = File.open(filename, mode, file_opts)
     rescue ArgumentError => e
-      raise unless /needs binmode/ =~ e.message and mode == "r"
+      raise unless /needs binmode/ =~ e.message && mode == "r"
       mode = "rb"
-      file_opts = {encoding: Encoding.default_external}.merge(file_opts)
+      file_opts = { encoding: Encoding.default_external }.merge(file_opts)
       retry
     end
     begin
@@ -1606,8 +1606,8 @@ class CSV
     @lineno = 0
 
     # make sure headers have been assigned
-    if header_row? and [Array, String].include? @use_headers.class and @write_headers
-      parse_headers  # won't read data for Array or String
+    if header_row? && [Array, String].include?(@use_headers.class) && @write_headers
+      parse_headers # won't read data for Array or String
       self << @headers
     end
   end
@@ -1644,11 +1644,14 @@ class CSV
       name ? name.first : converter
     end
   end
+
   #
   # Returns +true+ if unconverted_fields() to parsed results.  See CSV::new
   # for details.
   #
-  def unconverted_fields?() @unconverted_fields end
+  def unconverted_fields?()
+    @unconverted_fields
+  end
   #
   # Returns +nil+ if headers will not be used, +true+ if they will but have not
   # yet been read, or the actual headers after they have been read.  See
@@ -1657,13 +1660,20 @@ class CSV
   def headers
     @headers || true if @use_headers
   end
+
   #
   # Returns +true+ if headers will be returned as a row of results.
   # See CSV::new for details.
   #
-  def return_headers?()     @return_headers     end
+  def return_headers?()
+    @return_headers
+  end
+
   # Returns +true+ if headers are written in output. See CSV::new for details.
-  def write_headers?()      @write_headers      end
+  def write_headers?()
+    @write_headers
+  end
+
   #
   # Returns the current list of converters in effect for headers.  See CSV::new
   # for details.  Built-in converters will be returned by name, while others
@@ -1675,15 +1685,19 @@ class CSV
       name ? name.first : converter
     end
   end
+
   #
   # Returns +true+ blank lines are skipped by the parser. See CSV::new
   # for details.
   #
-  def skip_blanks?()        @skip_blanks        end
+  def skip_blanks?()
+    @skip_blanks
+  end
+
   # Returns +true+ if all output fields are quoted. See CSV::new for details.
-  def force_quotes?()       @force_quotes       end
-  # Returns +true+ if illegal input is handled. See CSV::new for details.
-  def liberal_parsing?()    @liberal_parsing    end
+  def force_quotes?()
+    @force_quotes
+  end
 
   #
   # The Encoding CSV is parsing or writing in.  This will be the Encoding you
@@ -1706,6 +1720,10 @@ class CSV
                        :ioctl, :isatty, :path, :pid, :pos, :pos=, :reopen,
                        :seek, :stat, :string, :sync, :sync=, :tell, :to_i,
                        :to_io, :truncate, :tty?
+  # Returns +true+ if illegal input is handled. See CSV::new for details.
+  def liberal_parsing?()
+    @liberal_parsing
+  end
 
   # Rewinds the underlying IO object and resets CSV's lineno() counter.
   def rewind
@@ -1726,8 +1744,8 @@ class CSV
   #
   def <<(row)
     # make sure headers have been assigned
-    if header_row? and [Array, String].include? @use_headers.class and !@write_headers
-      parse_headers  # won't read data for Array or String
+    if header_row? && [Array, String].include?(@use_headers.class) && !@write_headers
+      parse_headers # won't read data for Array or String
     end
 
     # handle CSV::Row objects and Hashes
@@ -1740,9 +1758,8 @@ class CSV
     @headers =  row if header_row?
     @lineno  += 1
 
-    output = row.map(&@quote).join(@col_sep) + @row_sep  # quote and separate
-    if @io.is_a?(StringIO)             and
-       output.encoding != (encoding = raw_encoding)
+    output = row.map(&@quote).join(@col_sep) + @row_sep # quote and separate
+    if @io.is_a?(StringIO) && output.encoding != (encoding = raw_encoding)
       if @force_encoding
         output = output.encode(encoding)
       elsif (compatible_encoding = Encoding.compatible?(@io.string, output))
@@ -1752,7 +1769,7 @@ class CSV
     end
     @io << output
 
-    self  # for chaining
+    self # for chaining
   end
   alias_method :add_row, :<<
   alias_method :puts,    :<<
@@ -1788,10 +1805,12 @@ class CSV
   # effect.
   #
   def header_convert(name = nil, &converter)
-    add_converter( :@header_converters,
-                   self.class::HeaderConverters,
-                   name,
-                   &converter )
+    add_converter(
+      :@header_converters,
+      self.class::HeaderConverters,
+      name,
+      &converter
+    )
   end
 
   include Enumerable
@@ -1830,7 +1849,7 @@ class CSV
 
   # Returns +true+ if the next row read will be a header row.
   def header_row?
-    @use_headers and @headers.nil?
+    @use_headers && @headers.nil?
   end
 
   #
@@ -2339,7 +2358,7 @@ class CSV
   # that encoding.
   #
   def encode_str(*chunks)
-    chunks.map { |chunk| chunk.encode(@encoding.name) }.join('')
+    chunks.map { |chunk| chunk.encode(@encoding.name) }.join("")
   end
 
   #
