@@ -205,6 +205,230 @@ require "stringio"
 # find with it.
 #
 class CSV
+  extend Forwardable
+
+  #
+  # The options used when no overrides are given by calling code.  They are:
+  #
+  # <b><tt>:col_sep</tt></b>::            <tt>","</tt>
+  # <b><tt>:row_sep</tt></b>::            <tt>:auto</tt>
+  # <b><tt>:quote_char</tt></b>::         <tt>'"'</tt>
+  # <b><tt>:field_size_limit</tt></b>::   +nil+
+  # <b><tt>:converters</tt></b>::         +nil+
+  # <b><tt>:unconverted_fields</tt></b>:: +nil+
+  # <b><tt>:headers</tt></b>::            +false+
+  # <b><tt>:return_headers</tt></b>::     +false+
+  # <b><tt>:header_converters</tt></b>::  +nil+
+  # <b><tt>:skip_blanks</tt></b>::        +false+
+  # <b><tt>:force_quotes</tt></b>::       +false+
+  # <b><tt>:skip_lines</tt></b>::         +nil+
+  # <b><tt>:liberal_parsing</tt></b>::    +false+
+  #
+  DEFAULT_OPTIONS = {
+    col_sep:            ",",
+    row_sep:            :auto,
+    quote_char:         '"',
+    field_size_limit:   nil,
+    converters:         nil,
+    unconverted_fields: nil,
+    headers:            false,
+    return_headers:     false,
+    header_converters:  nil,
+    skip_blanks:        false,
+    force_quotes:       false,
+    skip_lines:         nil,
+    liberal_parsing:    false,
+  }.freeze
+
+  # The error thrown when the parser encounters illegal CSV formatting.
+  class MalformedCSVError < RuntimeError; end
+
+  #
+  # A FieldInfo Struct contains details about a field's position in the data
+  # source it was read from.  CSV will pass this Struct to some blocks that make
+  # decisions based on field structure.  See CSV.convert_fields() for an
+  # example.
+  #
+  # <b><tt>index</tt></b>::  The zero-based index of the field in its row.
+  # <b><tt>line</tt></b>::   The line of the data source this row is from.
+  # <b><tt>header</tt></b>:: The header for the column, when available.
+  #
+  FieldInfo = Struct.new(:index, :line, :header)
+
+  # A Regexp used to find and convert some common Date formats.
+  DateMatcher     = / \A(?: (\w+,?\s+)?\w+\s+\d{1,2},?\s+\d{2,4} |
+                            \d{4}-\d{2}-\d{2} )\z /x
+  # A Regexp used to find and convert some common DateTime formats.
+  DateTimeMatcher =
+    / \A(?: (\w+,?\s+)?\w+\s+\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2},?\s+\d{2,4} |
+            \d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2} |
+            # ISO-8601
+            \d{4}-\d{2}-\d{2}
+              (?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?(?:[+-]\d{2}(?::\d{2})|Z)?)?)?
+        )\z /x
+
+  # The encoding used by all converters.
+  ConverterEncoding = Encoding.find("UTF-8")
+
+  #
+  # This Hash holds the built-in converters of CSV that can be accessed by name.
+  # You can select Converters with CSV.convert() or through the +options+ Hash
+  # passed to CSV::new().
+  #
+  # <b><tt>:integer</tt></b>::    Converts any field Integer() accepts.
+  # <b><tt>:float</tt></b>::      Converts any field Float() accepts.
+  # <b><tt>:numeric</tt></b>::    A combination of <tt>:integer</tt>
+  #                               and <tt>:float</tt>.
+  # <b><tt>:date</tt></b>::       Converts any field Date::parse() accepts.
+  # <b><tt>:date_time</tt></b>::  Converts any field DateTime::parse() accepts.
+  # <b><tt>:all</tt></b>::        All built-in converters.  A combination of
+  #                               <tt>:date_time</tt> and <tt>:numeric</tt>.
+  #
+  # All built-in converters transcode field data to UTF-8 before attempting a
+  # conversion.  If your data cannot be transcoded to UTF-8 the conversion will
+  # fail and the field will remain unchanged.
+  #
+  # This Hash is intentionally left unfrozen and users should feel free to add
+  # values to it that can be accessed by all CSV objects.
+  #
+  # To add a combo field, the value should be an Array of names.  Combo fields
+  # can be nested with other combo fields.
+  #
+  Converters  = {
+    integer:   lambda { |f|
+      Integer(f.encode(ConverterEncoding)) rescue f
+    },
+    float:     lambda { |f|
+      Float(f.encode(ConverterEncoding)) rescue f
+    },
+    numeric:   [:integer, :float],
+    date:      lambda { |f|
+      begin
+        e = f.encode(ConverterEncoding)
+        e =~ DateMatcher ? Date.parse(e) : f
+      rescue  # encoding conversion or date parse errors
+        f
+      end
+    },
+    date_time: lambda { |f|
+      begin
+        e = f.encode(ConverterEncoding)
+        e =~ DateTimeMatcher ? DateTime.parse(e) : f
+      rescue  # encoding conversion or date parse errors
+        f
+      end
+    },
+    all:       [:date_time, :numeric],
+  }
+
+  #
+  # This Hash holds the built-in header converters of CSV that can be accessed
+  # by name.  You can select HeaderConverters with CSV.header_convert() or
+  # through the +options+ Hash passed to CSV::new().
+  #
+  # <b><tt>:downcase</tt></b>::  Calls downcase() on the header String.
+  # <b><tt>:symbol</tt></b>::    Leading/trailing spaces are dropped, string is
+  #                              downcased, remaining spaces are replaced with
+  #                              underscores, non-word characters are dropped,
+  #                              and finally to_sym() is called.
+  #
+  # All built-in header converters transcode header data to UTF-8 before
+  # attempting a conversion.  If your data cannot be transcoded to UTF-8 the
+  # conversion will fail and the header will remain unchanged.
+  #
+  # This Hash is intentionally left unfrozen and users should feel free to add
+  # values to it that can be accessed by all CSV objects.
+  #
+  # To add a combo field, the value should be an Array of names.  Combo fields
+  # can be nested with other combo fields.
+  #
+  HeaderConverters = {
+    downcase: lambda { |h| h.encode(ConverterEncoding).downcase },
+    symbol:   lambda { |h|
+      h.encode(ConverterEncoding).downcase.gsub(/[^\s\w]+/, "").strip.
+                                           gsub(/\s+/, "_").to_sym
+    }
+  }
+
+  #
+  # The Encoding CSV is parsing or writing in.  This will be the Encoding you
+  # receive parsed data in and/or the Encoding data will be written in.
+  #
+  attr_reader :encoding
+
+  #
+  # The line number of the last row read from this file.  Fields with nested
+  # line-end characters will not affect this count.
+  #
+  attr_reader :lineno, :line
+
+  #
+  # The encoded <tt>:col_sep</tt> used in parsing and writing.  See CSV::new
+  # for details.
+  #
+  attr_reader :col_sep
+
+  #
+  # The encoded <tt>:row_sep</tt> used in parsing and writing.  See CSV::new
+  # for details.
+  #
+  attr_reader :row_sep
+
+  #
+  # The encoded <tt>:quote_char</tt> used in parsing and writing.  See CSV::new
+  # for details.
+  #
+  attr_reader :quote_char
+
+  # The limit for field size, if any.  See CSV::new for details.
+  attr_reader :field_size_limit
+
+  # The regex marking a line as a comment. See CSV::new for details
+  attr_reader :skip_lines
+
+  ### IO and StringIO Delegation ###
+
+  # An initialized CSV object will delegate to many IO methods for convenience.
+  # You may call:
+  #
+  # * binmode()
+  # * binmode?()
+  # * close()
+  # * close_read()
+  # * close_write()
+  # * closed?()
+  # * eof()
+  # * eof?()
+  # * external_encoding()
+  # * fcntl()
+  # * fileno()
+  # * flock()
+  # * flush()
+  # * fsync()
+  # * internal_encoding()
+  # * ioctl()
+  # * isatty()
+  # * path()
+  # * pid()
+  # * pos()
+  # * pos=()
+  # * reopen()
+  # * seek()
+  # * stat()
+  # * sync()
+  # * sync=()
+  # * tell()
+  # * to_i()
+  # * to_io()
+  # * truncate()
+  # * tty?()
+  def_delegators :@io, :binmode, :binmode?, :close, :close_read, :close_write,
+                       :closed?, :eof, :eof?, :external_encoding, :fcntl,
+                       :fileno, :flock, :flush, :fsync, :internal_encoding,
+                       :ioctl, :isatty, :path, :pid, :pos, :pos=, :reopen,
+                       :seek, :stat, :string, :sync, :sync=, :tell, :to_i,
+                       :to_io, :truncate, :tty?
+
   #
   # A CSV::Row is part Array and part Hash.  It retains an order for the fields
   # and allows duplicates just as an Array would, but also allows you to access
@@ -950,149 +1174,6 @@ class CSV
     end
   end
 
-  # The error thrown when the parser encounters illegal CSV formatting.
-  class MalformedCSVError < RuntimeError; end
-
-  #
-  # A FieldInfo Struct contains details about a field's position in the data
-  # source it was read from.  CSV will pass this Struct to some blocks that make
-  # decisions based on field structure.  See CSV.convert_fields() for an
-  # example.
-  #
-  # <b><tt>index</tt></b>::  The zero-based index of the field in its row.
-  # <b><tt>line</tt></b>::   The line of the data source this row is from.
-  # <b><tt>header</tt></b>:: The header for the column, when available.
-  #
-  FieldInfo = Struct.new(:index, :line, :header)
-
-  # A Regexp used to find and convert some common Date formats.
-  DateMatcher     = / \A(?: (\w+,?\s+)?\w+\s+\d{1,2},?\s+\d{2,4} |
-                            \d{4}-\d{2}-\d{2} )\z /x
-  # A Regexp used to find and convert some common DateTime formats.
-  DateTimeMatcher =
-    / \A(?: (\w+,?\s+)?\w+\s+\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2},?\s+\d{2,4} |
-            \d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2} |
-            # ISO-8601
-            \d{4}-\d{2}-\d{2}
-              (?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?(?:[+-]\d{2}(?::\d{2})|Z)?)?)?
-        )\z /x
-
-  # The encoding used by all converters.
-  ConverterEncoding = Encoding.find("UTF-8")
-
-  #
-  # This Hash holds the built-in converters of CSV that can be accessed by name.
-  # You can select Converters with CSV.convert() or through the +options+ Hash
-  # passed to CSV::new().
-  #
-  # <b><tt>:integer</tt></b>::    Converts any field Integer() accepts.
-  # <b><tt>:float</tt></b>::      Converts any field Float() accepts.
-  # <b><tt>:numeric</tt></b>::    A combination of <tt>:integer</tt>
-  #                               and <tt>:float</tt>.
-  # <b><tt>:date</tt></b>::       Converts any field Date::parse() accepts.
-  # <b><tt>:date_time</tt></b>::  Converts any field DateTime::parse() accepts.
-  # <b><tt>:all</tt></b>::        All built-in converters.  A combination of
-  #                               <tt>:date_time</tt> and <tt>:numeric</tt>.
-  #
-  # All built-in converters transcode field data to UTF-8 before attempting a
-  # conversion.  If your data cannot be transcoded to UTF-8 the conversion will
-  # fail and the field will remain unchanged.
-  #
-  # This Hash is intentionally left unfrozen and users should feel free to add
-  # values to it that can be accessed by all CSV objects.
-  #
-  # To add a combo field, the value should be an Array of names.  Combo fields
-  # can be nested with other combo fields.
-  #
-  Converters  = {
-    integer:   lambda { |f|
-      Integer(f.encode(ConverterEncoding)) rescue f
-    },
-    float:     lambda { |f|
-      Float(f.encode(ConverterEncoding)) rescue f
-    },
-    numeric:   [:integer, :float],
-    date:      lambda { |f|
-      begin
-        e = f.encode(ConverterEncoding)
-        e =~ DateMatcher ? Date.parse(e) : f
-      rescue  # encoding conversion or date parse errors
-        f
-      end
-    },
-    date_time: lambda { |f|
-      begin
-        e = f.encode(ConverterEncoding)
-        e =~ DateTimeMatcher ? DateTime.parse(e) : f
-      rescue  # encoding conversion or date parse errors
-        f
-      end
-    },
-    all:       [:date_time, :numeric],
-  }
-
-  #
-  # This Hash holds the built-in header converters of CSV that can be accessed
-  # by name.  You can select HeaderConverters with CSV.header_convert() or
-  # through the +options+ Hash passed to CSV::new().
-  #
-  # <b><tt>:downcase</tt></b>::  Calls downcase() on the header String.
-  # <b><tt>:symbol</tt></b>::    Leading/trailing spaces are dropped, string is
-  #                              downcased, remaining spaces are replaced with
-  #                              underscores, non-word characters are dropped,
-  #                              and finally to_sym() is called.
-  #
-  # All built-in header converters transcode header data to UTF-8 before
-  # attempting a conversion.  If your data cannot be transcoded to UTF-8 the
-  # conversion will fail and the header will remain unchanged.
-  #
-  # This Hash is intentionally left unfrozen and users should feel free to add
-  # values to it that can be accessed by all CSV objects.
-  #
-  # To add a combo field, the value should be an Array of names.  Combo fields
-  # can be nested with other combo fields.
-  #
-  HeaderConverters = {
-    downcase: lambda { |h| h.encode(ConverterEncoding).downcase },
-    symbol:   lambda { |h|
-      h.encode(ConverterEncoding).downcase.gsub(/[^\s\w]+/, "").strip.
-                                           gsub(/\s+/, "_").to_sym
-    }
-  }
-
-  #
-  # The options used when no overrides are given by calling code.  They are:
-  #
-  # <b><tt>:col_sep</tt></b>::            <tt>","</tt>
-  # <b><tt>:row_sep</tt></b>::            <tt>:auto</tt>
-  # <b><tt>:quote_char</tt></b>::         <tt>'"'</tt>
-  # <b><tt>:field_size_limit</tt></b>::   +nil+
-  # <b><tt>:converters</tt></b>::         +nil+
-  # <b><tt>:unconverted_fields</tt></b>:: +nil+
-  # <b><tt>:headers</tt></b>::            +false+
-  # <b><tt>:return_headers</tt></b>::     +false+
-  # <b><tt>:header_converters</tt></b>::  +nil+
-  # <b><tt>:skip_blanks</tt></b>::        +false+
-  # <b><tt>:force_quotes</tt></b>::       +false+
-  # <b><tt>:skip_lines</tt></b>::         +nil+
-  # <b><tt>:liberal_parsing</tt></b>::    +false+
-  #
-  DEFAULT_OPTIONS = {
-    col_sep:            ",",
-    row_sep:            :auto,
-    quote_char:         '"',
-    field_size_limit:   nil,
-    converters:         nil,
-    unconverted_fields: nil,
-    headers:            false,
-    return_headers:     false,
-    header_converters:  nil,
-    skip_blanks:        false,
-    force_quotes:       false,
-    skip_lines:         nil,
-    liberal_parsing:    false,
-  }.freeze
-
   #
   # This method will return a CSV instance, just like CSV::new(), but the
   # instance will be cached and returned for all future calls to this method for
@@ -1613,27 +1694,6 @@ class CSV
   end
 
   #
-  # The encoded <tt>:col_sep</tt> used in parsing and writing.  See CSV::new
-  # for details.
-  #
-  attr_reader :col_sep
-  #
-  # The encoded <tt>:row_sep</tt> used in parsing and writing.  See CSV::new
-  # for details.
-  #
-  attr_reader :row_sep
-  #
-  # The encoded <tt>:quote_char</tt> used in parsing and writing.  See CSV::new
-  # for details.
-  #
-  attr_reader :quote_char
-  # The limit for field size, if any.  See CSV::new for details.
-  attr_reader :field_size_limit
-
-  # The regex marking a line as a comment. See CSV::new for details
-  attr_reader :skip_lines
-
-  #
   # Returns the current list of converters in effect.  See CSV::new for details.
   # Built-in converters will be returned by name, while others will be returned
   # as is.
@@ -1684,28 +1744,6 @@ class CSV
   def force_quotes?()       @force_quotes       end
   # Returns +true+ if illegal input is handled. See CSV::new for details.
   def liberal_parsing?()    @liberal_parsing    end
-
-  #
-  # The Encoding CSV is parsing or writing in.  This will be the Encoding you
-  # receive parsed data in and/or the Encoding data will be written in.
-  #
-  attr_reader :encoding
-
-  #
-  # The line number of the last row read from this file.  Fields with nested
-  # line-end characters will not affect this count.
-  #
-  attr_reader :lineno, :line
-
-  ### IO and StringIO Delegation ###
-
-  extend Forwardable
-  def_delegators :@io, :binmode, :binmode?, :close, :close_read, :close_write,
-                       :closed?, :eof, :eof?, :external_encoding, :fcntl,
-                       :fileno, :flock, :flush, :fsync, :internal_encoding,
-                       :ioctl, :isatty, :path, :pid, :pos, :pos=, :reopen,
-                       :seek, :stat, :string, :sync, :sync=, :tell, :to_i,
-                       :to_io, :truncate, :tty?
 
   # Rewinds the underlying IO object and resets CSV's lineno() counter.
   def rewind
